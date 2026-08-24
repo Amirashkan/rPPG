@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rPPG consumer — external visual feedback</title>
+<style>
+  :root { --bg:#05070c; --text:#dbe6f5; --muted:#64748b; --accent:#4ade80; --beat:#f0537d; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); overflow: hidden;
+    font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .hud {
+    position: fixed; top: 16px; left: 16px; z-index: 2;
+    background: rgba(8,12,20,.72); backdrop-filter: blur(6px);
+    border: 1px solid #1c2434; border-radius: 10px; padding: 12px 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    min-width: 232px;
+  }
+  .hud h1 { font-size: 12px; margin: 0 0 8px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .row { display: flex; justify-content: space-between; gap: 16px; }
+  .row span:last-child { font-variant-numeric: tabular-nums; }
+  .src { margin-top: 9px; padding-top: 9px; border-top: 1px solid #1c2434; color: var(--muted); font-size: 11px; }
+  .src b { color: var(--accent); font-weight: 600; }
+  .stale b { color: var(--beat); }
+  .hint {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    color: var(--muted); font-size: 12px; text-align: center; z-index: 2;
+  }
+  code { color: #93c5fd; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="hud" id="hud">
+  <h1>rppg consumer</h1>
+  <div class="row"><span>bpm</span><span id="v-bpm">--</span></div>
+  <div class="row"><span>phase</span><span id="v-phase">--</span></div>
+  <div class="row"><span>confidence</span><span id="v-conf">--</span></div>
+  <div class="row"><span>state</span><span id="v-state">--</span></div>
+  <div class="row"><span>beats</span><span id="v-beats">0</span></div>
+  <div class="src" id="src">waiting for <b>BroadcastChannel('rppg')</b></div>
+</div>
+
+<div class="hint">
+  Open <code>index.html</code> in another tab and press <b>Start camera</b>.
+  Everything here is driven only by the published data — no camera access.
+</div>
+
+<script type="module">
+// ---------------------------------------------------------------------------
+// A minimal external consumer. It never touches a camera or any rPPG code; it
+// only listens for the published envelopes. Swap the transport below for a
+// WebSocket and this same file works from another machine.
+// ---------------------------------------------------------------------------
+
+const state = {
+  bpm: 0, phase: 0, confidence: 0, sessionState: 'idle',
+  beats: 0, lastMsg: 0, transport: null,
+};
+
+function handle(msg) {
+  if (!msg || typeof msg.type !== 'string' || !msg.type.startsWith('rppg.')) return;
+  state.lastMsg = performance.now();
+  if (msg.type === 'rppg.beat') { state.beats = msg.index ?? state.beats + 1; flash(); return; }
+  if (msg.type === 'rppg.metrics' || msg.type === 'rppg.frame') {
+    state.bpm = msg.bpm ?? state.bpm;
+    state.phase = msg.phase ?? state.phase;
+    state.confidence = msg.confidence ?? state.confidence;
+    if (msg.state) state.sessionState = msg.state;
+  }
+}
+
+// Transport 1: another tab on the same origin.
+if ('BroadcastChannel' in window) {
+  const ch = new BroadcastChannel('rppg');
+  ch.onmessage = (e) => { state.transport = "BroadcastChannel('rppg')"; handle(e.data); };
+}
+// Transport 2: embedded in an iframe, or opened by the interface.
+window.addEventListener('message', (e) => { state.transport = 'postMessage'; handle(e.data); });
+// Transport 3: uncomment to consume from the relay instead.
+// const ws = new WebSocket('ws://localhost:8787');
+// ws.onmessage = (e) => { state.transport = 'WebSocket'; handle(JSON.parse(e.data)); };
+
+// ------------------------------------------------------------- rendering ---
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 0; let H = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+const ripples = [];
+function flash() { ripples.push({ born: performance.now() }); }
+
+// A local oscillator that eases toward the published phase. Metrics arrive at
+// 5-30 Hz; this keeps the animation smooth at display rate without ever
+// drifting away from the real cardiac phase.
+let localPhase = 0;
+let lastT = performance.now();
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.1, (now - lastT) / 1000);
+  lastT = now;
+
+  const fresh = now - state.lastMsg < 2000;
+  const conf = fresh ? state.confidence : 0;
+
+  // Advance at the reported rate, then pull toward the reported phase.
+  localPhase += 2 * Math.PI * (state.bpm / 60) * dt;
+  let err = state.phase - localPhase;
+  err = Math.atan2(Math.sin(err), Math.cos(err));
+  localPhase += err * Math.min(1, 3 * dt);
+  const pulse = Math.max(0, Math.cos(localPhase)) ** 2;
+
+  ctx.fillStyle = '#05070c';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W / 2;
+  const cy = H / 2;
+  const base = Math.min(W, H) * 0.17;
+  const r = base * (1 + 0.22 * pulse * conf);
+
+  // Beat ripples.
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const age = (now - ripples[i].born) / 1000;
+    if (age > 1.6) { ripples.splice(i, 1); continue; }
+    const t = age / 1.6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, base + t * Math.min(W, H) * 0.45, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(240,83,125,${(1 - t) * 0.5 * conf})`;
+    ctx.lineWidth = 2 * (1 - t) + 0.5;
+    ctx.stroke();
+  }
+
+  // Core glow, brightness follows confidence so poor signal looks poor.
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 2.6);
+  grad.addColorStop(0, `rgba(240,83,125,${0.55 * conf + 0.05})`);
+  grad.addColorStop(0.45, `rgba(96,165,250,${0.16 * conf})`);
+  grad.addColorStop(1, 'rgba(5,7,12,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 2.6, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(240,83,125,${0.25 + 0.6 * conf})`;
+  ctx.fill();
+
+  // Phase dial: one full turn per cardiac cycle.
+  const dial = base * 1.75;
+  ctx.beginPath();
+  ctx.arc(cx, cy, dial, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(100,116,139,0.25)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, dial, -Math.PI / 2, -Math.PI / 2 + (localPhase % (2 * Math.PI)));
+  ctx.strokeStyle = `rgba(74,222,128,${0.3 + 0.7 * conf})`;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  const a = -Math.PI / 2 + (localPhase % (2 * Math.PI));
+  ctx.beginPath();
+  ctx.arc(cx + Math.cos(a) * dial, cy + Math.sin(a) * dial, 5, 0, Math.PI * 2);
+  ctx.fillStyle = '#4ade80';
+  ctx.fill();
+
+  // HUD.
+  document.getElementById('v-bpm').textContent = state.bpm ? state.bpm.toFixed(1) : '--';
+  document.getElementById('v-phase').textContent = localPhase % (2 * Math.PI) >= 0
+    ? (localPhase % (2 * Math.PI)).toFixed(2) : '--';
+  document.getElementById('v-conf').textContent = conf.toFixed(2);
+  document.getElementById('v-state').textContent = fresh ? state.sessionState : 'no data';
+  document.getElementById('v-beats').textContent = state.beats;
+  const src = document.getElementById('src');
+  src.innerHTML = state.transport
+    ? `source <b>${state.transport}</b>`
+    : "waiting for <b>BroadcastChannel('rppg')</b>";
+  src.className = fresh || !state.transport ? 'src' : 'src stale';
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

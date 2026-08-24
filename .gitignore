@@ -1,0 +1,8 @@
+node_modules/
+*.jsonl
+*.log
+rppg-*-session.json
+rppg-*-raw.csv
+rppg-*-metrics.csv
+rppg-*-beats.csv
+.DS_Store

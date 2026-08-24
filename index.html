@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rPPG — camera pulse interface</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>❤️</text></svg>">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="pulse-dot" id="dot"></span>
+    <h1>rPPG</h1>
+    <span class="sub">camera pulse &amp; data source</span>
+  </div>
+  <div class="bar-actions">
+    <span class="pill" id="state-pill">idle</span>
+    <button id="btn-start" class="primary">Start camera</button>
+    <button id="btn-stop" disabled>Stop</button>
+  </div>
+</header>
+
+<main>
+  <!-- ------------------------------------------------ camera + controls -->
+  <section class="panel camera">
+    <div class="stage" id="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div class="stage-hint" id="stage-hint">
+        <p>Press <b>Start camera</b>. Sit still, face an even light source, and
+        keep the box on your forehead.</p>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>Camera
+        <select id="sel-device"></select>
+      </label>
+      <label>Method
+        <select id="sel-method">
+          <option value="pos" selected>POS — Wang 2017</option>
+          <option value="chrom">CHROM — de Haan 2013</option>
+          <option value="green">GREEN — Verkruysse 2008</option>
+        </select>
+      </label>
+      <label>Search band
+        <span class="range-row">
+          <input type="number" id="in-minbpm" value="42" min="30" max="120" step="1">
+          <span>–</span>
+          <input type="number" id="in-maxbpm" value="210" min="90" max="240" step="1">
+          <span class="unit">bpm</span>
+        </span>
+      </label>
+      <label class="check"><input type="checkbox" id="chk-skin" checked> Skin-tone mask</label>
+      <label class="check"><input type="checkbox" id="chk-autoroi"> Auto-track face <span class="note" id="fd-note"></span></label>
+      <label class="check"><input type="checkbox" id="chk-mirror" checked> Mirror preview</label>
+      <button id="btn-roi-reset" class="ghost small">Reset ROI</button>
+      <p class="hint">Drag inside the box to move it, drag the corner to resize.</p>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------- live values -->
+  <section class="panel readout">
+    <div class="bpm">
+      <div class="bpm-value"><span id="bpm">--</span><small>bpm</small></div>
+      <div class="bpm-meta">
+        <div><span class="k">state</span><span class="v" id="v-state">idle</span></div>
+        <div><span class="k">confidence</span><span class="v" id="v-conf">–</span></div>
+        <div><span class="k">SNR</span><span class="v" id="v-snr">–</span></div>
+        <div><span class="k">IBI</span><span class="v" id="v-ibi">–</span></div>
+        <div><span class="k">RMSSD</span><span class="v" id="v-rmssd">–</span></div>
+        <div><span class="k">ROI fill</span><span class="v" id="v-fill">–</span></div>
+        <div><span class="k">camera</span><span class="v" id="v-fps">–</span></div>
+      </div>
+    </div>
+    <div class="conf-bar"><i id="conf-fill"></i></div>
+    <div class="heartbox" title="Driven by the tracked phase — this is what an external visual would look like">
+      <div class="heart" id="heart">❤</div>
+      <span class="heartlabel">phase preview</span>
+    </div>
+  </section>
+
+  <section class="panel chart"><canvas id="c-wave"></canvas></section>
+  <section class="panel chart small"><canvas id="c-spectrum"></canvas></section>
+  <section class="panel chart small"><canvas id="c-trend"></canvas></section>
+
+  <!-- --------------------------------------------------------- data out -->
+  <section class="panel data">
+    <h2>Data out <span class="sub">for your external feedback loop</span></h2>
+
+    <div class="datagrid">
+      <div class="sinks">
+        <label class="check"><input type="checkbox" id="chk-bc" checked>
+          <b>BroadcastChannel</b> <code>'rppg'</code>
+          <span class="note">any tab on this origin</span></label>
+
+        <label class="check"><input type="checkbox" id="chk-pm" checked>
+          <b>postMessage</b>
+          <span class="note">to <code>window.opener</code> / <code>parent</code></span></label>
+
+        <div class="ws">
+          <label class="check"><input type="checkbox" id="chk-ws">
+            <b>WebSocket</b> <span class="note" id="ws-status">off</span></label>
+          <input type="text" id="in-ws" value="ws://localhost:8787" spellcheck="false">
+        </div>
+
+        <label>Stream rate
+          <span class="range-row">
+            <input type="range" id="in-rate" min="1" max="30" step="1" value="15">
+            <span class="unit"><span id="rate-label">15</span> Hz</span>
+          </span>
+        </label>
+        <label class="check"><input type="checkbox" id="chk-frames">
+          Also stream per-frame <code>rppg.frame</code> <span class="note">full rate, compact</span></label>
+
+        <p class="hint">
+          Open <a href="examples/consumer.html" target="_blank" rel="noopener">the example consumer</a>
+          in another tab to see the loop close. Schema: <a href="docs/DATA.md" target="_blank" rel="noopener">docs/DATA.md</a>.
+        </p>
+      </div>
+
+      <div class="feed">
+        <div class="feed-head">
+          <span>latest <code>rppg.metrics</code></span>
+          <span class="note" id="msg-count">0 sent</span>
+        </div>
+        <pre id="feed">{ }</pre>
+      </div>
+    </div>
+
+    <div class="record">
+      <button id="btn-record">● Record</button>
+      <button id="btn-export" disabled>Export session</button>
+      <button id="btn-clear" class="ghost" disabled>Clear</button>
+      <span class="note" id="rec-status">not recording</span>
+    </div>
+    <p class="hint">
+      Export writes four files: the full <code>session.json</code>, plus
+      <code>raw.csv</code> (per-frame ROI RGB — the source measurement, so the session
+      can be re-analysed later), <code>metrics.csv</code>, and <code>beats.csv</code>.
+    </p>
+  </section>
+
+  <section class="panel note-panel">
+    <h2>Reading the numbers</h2>
+    <ul>
+      <li><b>Not a medical device.</b> Camera pulse extraction is sensitive to motion, lighting and skin tone. Treat it as a signal source, not a diagnostic.</li>
+      <li><b>Give it ~10 s.</b> The heart-rate estimate is spectral over a 10 s window, so it needs that much history before it locks.</li>
+      <li><b>Confidence is the gate.</b> Below ~0.55 the state stays <code>searching</code> — drive your visuals from <code>confidence</code> so they degrade honestly rather than animating noise.</li>
+      <li><b>Steady, diffuse light beats bright light.</b> Avoid a screen behind you, flickering LEDs, and anything that makes the camera hunt for exposure.</li>
+      <li><b>HRV from a webcam is indicative only.</b> RMSSD needs beat timing far more precise than 30 fps gives you.</li>
+    </ul>
+  </section>
+</main>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

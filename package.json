@@ -1,0 +1,13 @@
+{
+  "name": "rppg",
+  "version": "0.1.0",
+  "description": "Browser rPPG (remote photoplethysmography) interface with a streamable data layer for external visual feedback loops.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "serve": "node server/serve.mjs",
+    "relay": "node server/relay.mjs",
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "engines": { "node": ">=20" }
+}
