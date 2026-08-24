@@ -22,6 +22,7 @@ const charts = {
 let latest = null;
 let running = false;
 let beatCount = 0;
+let retunedFps = null;
 
 // ------------------------------------------------------------- lifecycle ---
 
@@ -89,6 +90,7 @@ async function populateDevices() {
 capture.onFrame = (frame) => {
   if (!running) return;
   recorder.frame(frame);
+  retuneRate();
 
   const metrics = pipeline.pushFrame(frame);
 
@@ -129,6 +131,32 @@ capture.onFrame = (frame) => {
     recorder.metric(metrics);
   }
 };
+
+/**
+ * Match the analysis rate to what the camera actually delivers.
+ *
+ * Virtual cameras and phone-as-webcam bridges routinely advertise 30 fps and
+ * deliver 20 or less. Resampling 20 fps up to an assumed 30 does not create
+ * information, it just interpolates - and the interpolation correlates
+ * neighbouring samples, which colours the noise floor in the band we care
+ * about. Analysing at the true rate avoids all of it.
+ */
+function retuneRate() {
+  const eff = capture.effectiveFps;
+  if (!eff) return;
+  const want = Math.round(clamp(eff, 12, 60));
+  if (retunedFps === want) return;
+  if (Math.abs(want - pipeline.opt.fs) / pipeline.opt.fs < 0.12) {
+    retunedFps = want;
+    return;
+  }
+  retunedFps = want;
+  const opt = { ...pipeline.opt, fs: want };
+  pipeline = new RppgPipeline(opt);
+  latest = null;
+  hub.publish({ ...pipeline.describe(), camera: capture.settings(), event: 'retuned', effectiveFps: +eff.toFixed(2) });
+  console.info(`[rppg] camera delivers ${eff.toFixed(1)} fps; analysing at ${want} Hz`);
+}
 
 // --------------------------------------------------------------- render ---
 
@@ -223,10 +251,12 @@ function drawOverlay() {
 function roiWarning() {
   if (!latest) return null;
   const q = latest.quality;
+  const eff = capture.effectiveFps;
   if (q.contaminated) return 'movement detected — hold still';
   if (q.roiFill < 0.35) return 'ROI is mostly not skin — move it onto bare forehead';
   if (q.clipping > 0.05) return 'overexposed — reduce light or move away from the window';
   if (q.motion > 0.03) return 'too much motion';
+  if (eff && eff < 15) return `camera is only delivering ${eff.toFixed(0)} fps`;
   return null;
 }
 
@@ -239,8 +269,8 @@ function updateReadout() {
   $('v-ibi').textContent = m && m.ibiMs ? `${m.ibiMs.toFixed(0)} ms` : '–';
   $('v-rmssd').textContent = m && m.hrv.rmssdMs ? `${m.hrv.rmssdMs.toFixed(0)} ms` : '–';
   $('v-fill').textContent = m ? `${(m.quality.roiFill * 100).toFixed(0)}%` : '–';
-  const el = pipeline.elapsed;
-  $('v-fps').textContent = running && el > 2 ? `${(pipeline.frameCount / el).toFixed(1)} fps` : '–';
+  const eff = capture.effectiveFps;
+  $('v-fps').textContent = running && eff ? `${eff.toFixed(1)} fps` : '–';
 
   const c = running ? pipeline.confidence : 0;
   const bar = $('conf-fill');

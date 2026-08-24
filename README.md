@@ -126,6 +126,26 @@ band edges, that phase advances at the heart rate, that the pipeline reacquires
 after a dropped-camera gap, that confidence stays low when there is no pulse at
 all, and that the relay's hand-rolled WebSocket framing round-trips.
 
+## Cameras
+
+The camera matters more than anything else here. A blood volume pulse moves the
+average brightness of a patch of skin by a few tenths of one 8-bit level, so
+anything that adds a comparable amount of noise destroys it.
+
+- **Use a directly attached camera.** A built-in laptop webcam or any UVC USB
+  camera is fine.
+- **Phone-as-webcam bridges (DroidCam, Iriun, EpocCam, Camo) and virtual
+  cameras (OBS) are a poor fit.** They re-encode the video, and a codec
+  quantises flat regions like a forehead as whole blocks — so the error does
+  not average away over pixels the way sensor noise does. They also tend to
+  advertise 30 fps while delivering closer to 20, and to run their own
+  auto-exposure on top of the phone's.
+- **Turn off auto-exposure and auto-white-balance if your camera lets you.**
+  Both of them modulate exactly the quantity being measured. The interface asks
+  for manual mode where the browser supports it, which is not everywhere.
+- **Watch the `camera` readout.** It shows measured frames per second, not the
+  advertised figure, and the analysis rate follows it automatically.
+
 ## Getting a good signal
 
 - Even, steady, diffuse light on your face. Daylight from a window is ideal.

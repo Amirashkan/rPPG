@@ -35,7 +35,7 @@ Emitted at the configured stream rate (1–30 Hz, default 15 Hz).
   "ibiMs": 878.0,
   "hrv": { "rmssdMs": 42.1, "sdnnMs": 51.0, "beats": 47 },
   "quality": { "roiFill": 0.712, "motion": 0.0031, "clipping": 0.0,
-               "contaminated": false, "artefacts": 3 },
+               "contaminated": false, "artefacts": 3, "maskChurn": 0.0009 },
   "method": "pos",
   "fs": 30,
   "frames": 1280,
@@ -62,6 +62,7 @@ Emitted at the configured stream rate (1–30 Hz, default 15 Hz).
 | `quality.clipping` | fraction of blown-out or crushed pixels. Anything above 0 hurts |
 | `quality.contaminated` | a large artefact is still inside the analysis window. `bpm` is **held**, not re-estimated — the reading is stale rather than wrong |
 | `quality.artefacts` | running count of rejected excursions. A number that keeps climbing means the subject is moving |
+| `quality.maskChurn` | mean per-pixel change in skin-mask membership between frames. Should sit near zero; if it does not, the trace is partly measuring the mask rather than the face |
 
 ### `rppg.frame` — per-frame, low latency
 
@@ -92,6 +93,10 @@ than the spectral `bpm` in `rppg.metrics`. Use beats for discrete triggers
 
 Sent once when capture starts, and again with `"event": "stopped"` at the end.
 Carries method, sample rate, search band, and camera settings.
+
+A third form carries `"event": "retuned"` with `effectiveFps`, sent when the
+analysis rate is changed to match what the camera actually delivers. `fs` in
+subsequent records reflects the new rate.
 
 ---
 

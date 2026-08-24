@@ -5,43 +5,13 @@
 // downscale is the whole performance story: averaging 160x120 pixels costs
 // nothing, and the mean is identical to averaging the full-resolution frame.
 
+import { RoiSampler } from './roi.js';
+
 const WORK_W = 192;
 const WORK_H = 144;
 
 /** Default ROI as a fraction of the frame: forehead + upper cheeks. */
 export const DEFAULT_ROI = { x: 0.34, y: 0.18, w: 0.32, h: 0.30 };
-
-/**
- * Chrominance half of the skin gate (Chai & Ngan). Illumination-tolerant and
- * largely independent of skin tone, because it looks at hue rather than
- * brightness.
- *
- * On its own it is not enough: under warm indoor light dark hair and eyebrows
- * land inside these bounds too, which is why the caller pairs it with the
- * luminance gate below.
- */
-function skinChroma(r, g, b) {
-  const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
-  const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
-  return cb >= 77 && cb <= 133 && cr >= 133 && cr <= 180 && cr - cb > 8 && r > b;
-}
-
-// Luminance bounds as a fraction of the ROI's median, which is what makes this
-// work across skin tones: hair, eyebrows and shadow are a fraction of the
-// brightness of the face they sit on, whatever that face's brightness is, and
-// specular glints off skin or glasses are well above it.
-const LUMA_FLOOR = 0.6;
-const LUMA_CEIL = 1.5;
-
-/** Median luminance of the ROI, via a 256-bin histogram. */
-function medianLuma(hist, count) {
-  let seen = 0;
-  for (let i = 0; i < 256; i++) {
-    seen += hist[i];
-    if (seen >= count / 2) return i;
-  }
-  return 128;
-}
 
 export class Capture {
   /** @param {object} [o] @param {HTMLVideoElement} [o.video] element to render into */
@@ -56,7 +26,9 @@ export class Capture {
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
 
     this.roi = { ...DEFAULT_ROI };
+    this.sampler = new RoiSampler();
     this.useSkinMask = true;
+    this.intervals = [];   // recent frame intervals, for the effective rate
     this.stream = null;
     this.prevLuma = null;
     this.running = false;
@@ -129,9 +101,18 @@ export class Capture {
     }
 
     this.running = true;
-    this.prevLuma = null;
+    this.sampler.reset();
+    this.intervals = [];
+    this.lastT = null;
     this._loop();
     return this.settings();
+  }
+
+  /** Median frames per second actually observed, or null before enough frames. */
+  get effectiveFps() {
+    if (this.intervals.length < 20) return null;
+    const s = [...this.intervals].sort((a, b) => a - b);
+    return 1 / s[s.length >> 1];
   }
 
   settings() {
@@ -215,76 +196,33 @@ export class Capture {
     const w = Math.max(1, Math.min(WORK_W - x0, Math.round(this.roi.w * WORK_W)));
     const h = Math.max(1, Math.min(WORK_H - y0, Math.round(this.roi.h * WORK_H)));
     const img = this.ctx.getImageData(x0, y0, w, h);
-    const d = img.data;
-    const total = w * h;
 
-    // Pass 1: luminance distribution and exposure problems.
-    const hist = this._hist ?? (this._hist = new Uint32Array(256));
-    hist.fill(0);
-    let lumaSum = 0;
-    let clipped = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      const r = d[i];
-      const g = d[i + 1];
-      const b = d[i + 2];
-      const y = 0.299 * r + 0.587 * g + 0.114 * b;
-      lumaSum += y;
-      hist[y | 0]++;
-      if (r >= 253 || g >= 253 || b >= 253 || (r < 12 && g < 12 && b < 12)) clipped++;
-    }
+    const s = this.sampler.sample(img.data, w * h, this.useSkinMask);
 
-    // Pass 2: average the pixels that are actually perfused skin.
-    const med = medianLuma(hist, total);
-    const floor = med * LUMA_FLOOR;
-    const ceil = Math.min(250, med * LUMA_CEIL);
-
-    let sr = 0;
-    let sg = 0;
-    let sb = 0;
-    let n = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      const r = d[i];
-      const g = d[i + 1];
-      const b = d[i + 2];
-      if (this.useSkinMask) {
-        const y = 0.299 * r + 0.587 * g + 0.114 * b;
-        if (y < floor || y > ceil) continue;      // hair, brows, shadow, glints
-        if (!skinChroma(r, g, b)) continue;
-      }
-      sr += r;
-      sg += g;
-      sb += b;
-      n++;
-    }
-
-    // If the gate rejects nearly everything (bad lighting, the ROI off the
-    // face) fall back to the plain box average rather than emit nothing. The
-    // low roiFill is what tells the user why their confidence is poor.
-    const roiFill = n / total;
-    if (n < total * 0.08) {
-      sr = sg = sb = 0;
-      n = 0;
-      for (let i = 0; i < d.length; i += 4) {
-        sr += d[i];
-        sg += d[i + 1];
-        sb += d[i + 2];
-        n++;
+    // Track what the camera actually delivers. Virtual cameras and phone-as-
+    // webcam bridges routinely advertise 30 fps and deliver far less.
+    if (this.lastT != null) {
+      const dt = tSec - this.lastT;
+      if (dt > 0 && dt < 1) {
+        this.intervals.push(dt);
+        if (this.intervals.length > 120) this.intervals.shift();
       }
     }
-
-    // Frame-to-frame luma change inside the ROI: a proxy for head motion.
-    const luma = lumaSum / total;
-    const motion = this.prevLuma === null ? 0 : Math.abs(luma - this.prevLuma) / (luma || 1);
-    this.prevLuma = luma;
+    this.lastT = tSec;
 
     this._maybeDetectFace(tSec);
 
     this.onFrame?.({
       t: tSec,
-      r: sr / n,
-      g: sg / n,
-      b: sb / n,
-      quality: { roiFill, motion, clipping: clipped / total },
+      r: s.r,
+      g: s.g,
+      b: s.b,
+      quality: {
+        roiFill: s.roiFill,
+        motion: s.motion,
+        clipping: s.clipping,
+        maskChurn: s.maskChurn,
+      },
       roi: { ...this.roi },
     });
   }

@@ -498,6 +498,10 @@ export class RppgPipeline {
         // set, so a consumer knows the reading is stale rather than wrong.
         contaminated: this.elapsed < this.artefactUntil,
         artefacts: this.artefacts,
+        // Mean per-pixel change in mask membership between frames. If this is
+        // not far below the pulse amplitude, the trace is partly measuring the
+        // mask rather than the face.
+        maskChurn: round(this.quality.maskChurn ?? 0, 5),
       },
       method: this.opt.method,
       fs: this.opt.fs,
