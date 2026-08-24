@@ -34,7 +34,8 @@ Emitted at the configured stream rate (1–30 Hz, default 15 Hz).
   "lastBeatT": 42.2,
   "ibiMs": 878.0,
   "hrv": { "rmssdMs": 42.1, "sdnnMs": 51.0, "beats": 47 },
-  "quality": { "roiFill": 0.712, "motion": 0.0031, "clipping": 0.0 },
+  "quality": { "roiFill": 0.712, "motion": 0.0031, "clipping": 0.0,
+               "contaminated": false, "artefacts": 3 },
   "method": "pos",
   "fs": 30,
   "frames": 1280,
@@ -59,6 +60,8 @@ Emitted at the configured stream rate (1–30 Hz, default 15 Hz).
 | `quality.roiFill` | fraction of ROI pixels passing the skin gate. Below ~0.3 means the ROI is off-face |
 | `quality.motion` | frame-to-frame ROI luma change. Above ~0.02 the estimate degrades |
 | `quality.clipping` | fraction of blown-out or crushed pixels. Anything above 0 hurts |
+| `quality.contaminated` | a large artefact is still inside the analysis window. `bpm` is **held**, not re-estimated — the reading is stale rather than wrong |
+| `quality.artefacts` | running count of rejected excursions. A number that keeps climbing means the subject is moving |
 
 ### `rppg.frame` — per-frame, low latency
 
@@ -192,6 +195,12 @@ Three rules that make the difference between a convincing loop and a twitchy one
 2. **Never snap the phase.** Ease toward it; a snap reads as a glitch.
 3. **Ignore `bpm` while `state !== 'locked'`.** During `acquiring` and
    `searching` the estimate is still sweeping the band.
+
+`state` is Schmitt-triggered: it enters `locked` at confidence 0.62 and leaves
+only below 0.42 sustained for 2 s. That is deliberate — a bare threshold makes
+the state flip every few seconds on a marginal signal, which is useless to
+animate from. If you want the raw quantity rather than the debounced one, use
+`confidence` directly.
 
 ---
 

@@ -7,7 +7,7 @@
 // testable in Node and reusable for offline re-analysis of recorded sessions.
 
 import {
-  designButterworthBandpass, IIRFilter, welch, bandPeak,
+  designButterworthBandpass, IIRFilter, welch, bandPeak, bandPower, localPeakNear,
   meanOf, stdOf, detrend, findPeaks, refinePeak, filtfilt,
 } from './dsp.js';
 import { WindowedExtractor, METHOD_INFO } from './methods.js';
@@ -23,6 +23,21 @@ export const DEFAULTS = {
   metricsHz: 5,         // rate of full metric emissions
   trackerBandwidthHz: 0.3, // how fast the phase tracker may follow HR changes
   maxGapSec: 1.5,       // longer frame gaps restart the uniform timeline
+
+  // Lock hysteresis. A single threshold on a noisy confidence makes the state
+  // chatter between locked and searching every few seconds, which is both
+  // useless to look at and useless to drive a visual from. Entering the lock
+  // takes a clearly good signal; leaving it takes a clearly bad one, sustained.
+  lockEnter: 0.62,
+  lockExit: 0.42,
+  lockDwellSec: 2.0,
+  confRise: 0.25,       // per estimate (2 Hz), so ~2 s to rise
+  confFall: 0.08,       // ~6 s to fall: brief dips do not drop the lock
+  slewLockedHz: 0.06,   // 3.6 bpm/s once locked
+  slewSearchHz: 0.35,   // 21 bpm/s while reacquiring
+  freezeBelow: 0.25,    // below this confidence, hold the rate instead of chasing noise
+  subharmonicRatio: 0.25, // prefer f/2 when it carries this fraction of the peak
+  artefactSigma: 5,     // |sample| above this many baseline RMS is not a pulse
 };
 
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
@@ -74,7 +89,11 @@ export class RppgPipeline {
     this.snrDb = -Infinity;
     this.confidence = 0;
     this.state = 'idle';
+    this._belowSince = null;
 
+    this.rmsSlow = 0;
+    this.artefactUntil = -Infinity;
+    this.artefacts = 0;
     this.lo = { re: 0, im: 0 }; // quadrature tracker state
     this.psi = 0;               // local oscillator phase
     this.phase = 0;
@@ -191,6 +210,22 @@ export class RppgPipeline {
     const rmsAlpha = 1 - Math.exp(-1 / (3 * fs));
     this.rms = Math.sqrt((1 - rmsAlpha) * this.rms * this.rms + rmsAlpha * y * y);
 
+    // A much slower baseline, so a single large excursion cannot inflate the
+    // very threshold that is supposed to catch it.
+    const slowAlpha = 1 - Math.exp(-1 / (20 * fs));
+    this.rmsSlow = Math.sqrt((1 - slowAlpha) * this.rmsSlow * this.rmsSlow + slowAlpha * y * y);
+
+    // A blink, a swallow, a head turn: energy orders of magnitude above the
+    // pulse. It contaminates the whole analysis window, not just its own
+    // samples, so the rate estimate is suspended until the window has moved
+    // past it. Without this the estimator happily tracks the artefact - and
+    // because a slew limit bounds speed but not distance, it will walk all the
+    // way to the edge of the search band and sit there looking confident.
+    if (this.n > 5 * fs && this.rmsSlow > 1e-12 && Math.abs(y) > this.opt.artefactSigma * this.rmsSlow) {
+      this.artefactUntil = t + this.opt.analysisSec;
+      this.artefacts++;
+    }
+
     this._track(y);
     this._detectBeat(t);
 
@@ -276,20 +311,105 @@ export class RppgPipeline {
     this.spectrum = { freqs, psd };
     if (!peak) return;
 
+    const t = this.elapsed;
     this.snrDb = peak.snrDb;
-    const conf = snrToConfidence(peak.snrDb) * clamp(this.quality.roiFill || 1, 0, 1);
-    this.confidence = 0.8 * this.confidence + 0.2 * conf;
 
-    // Follow the spectral peak, but slew-limit so a momentary artefact cannot
-    // yank the phase tracker off the real rate.
-    const target = clamp(peak.freq, this.loHz, this.hiHz);
-    const maxStep = this.confidence > 0.5 ? 0.08 : 0.5;
-    const delta = clamp(target - this.freqHz, -maxStep, maxStep);
-    this.freqHz += delta;
+    // Confidence rises faster than it falls, so a one-off artefact costs a
+    // little confidence rather than the whole lock.
+    let target = snrToConfidence(peak.snrDb) * clamp(this.quality.roiFill || 1, 0, 1);
 
-    this.state = this.confidence > 0.55 ? 'locked' : 'searching';
+    // Head motion moves far more light than a heartbeat does; when it is
+    // present the spectrum is measuring the motion.
+    const motion = this.quality.motion ?? 0;
+    target *= clamp(1 - motion / 0.05, 0.05, 1);
+
+    // A peak pinned to the edge of the search band is nearly always energy
+    // leaking in from outside it, not a heart rate that happens to sit exactly
+    // at the limit.
+    if (peak.freq <= this.loHz * 1.02 || peak.freq >= this.hiHz * 0.98) target *= 0.4;
+
+    // A window still containing a large artefact cannot be trusted at all.
+    const contaminated = t < this.artefactUntil;
+    if (contaminated) target = Math.min(target, 0.15);
+
+    const a = target > this.confidence ? this.opt.confRise : this.opt.confFall;
+    this.confidence += a * (target - this.confidence);
+
+    if (!contaminated) this.freqHz = this._trackFrequency(peak, freqs, psd);
+    this._updateLock(t);
+
     this.bpmHistory.push({ t: this.times[(this.n - 1) % this.capacity], bpm: this.freqHz * 60, confidence: this.confidence });
     if (this.bpmHistory.length > 3600) this.bpmHistory.shift();
+  }
+
+  /**
+   * Move the tracked rate toward the spectral peak, slew-limited, with an
+   * octave guard.
+   *
+   * The guard matters because the second harmonic of a real pulse often rivals
+   * the fundamental. Without it the estimate flips between f and 2f, and every
+   * flip destroys the phase lock and the confidence with it.
+   */
+  _trackFrequency(peak, freqs, psd) {
+    // Below the confidence floor there is nothing worth following; holding the
+    // last good rate beats chasing whatever the noise happened to peak at.
+    if (this.confidence < this.opt.freezeBelow && this.state !== 'acquiring') {
+      return this.freqHz;
+    }
+
+    let target = clamp(peak.freq, this.loHz, this.hiHz);
+
+    // Octave check. A pulse with a sharp systolic upstroke can put more power
+    // in its second harmonic than in its fundamental, and reporting double
+    // someone's heart rate is the worst failure this thing can have. If half
+    // the peak frequency is in band and carries a real share of the power,
+    // that is the fundamental.
+    const half = target / 2;
+    if (half >= this.loHz) {
+      const cand = localPeakNear(freqs, psd, half, 0.1);
+      if (cand) {
+        const atHalf = bandPower(freqs, psd, cand.freq, 0.1);
+        const atPeak = bandPower(freqs, psd, target, 0.1);
+        if (atHalf > this.opt.subharmonicRatio * atPeak) target = cand.freq;
+      }
+    }
+
+    if (this.state === 'locked') {
+      const ratio = target / this.freqHz;
+      const isOctave = Math.abs(ratio - 2) < 0.15 || Math.abs(ratio - 0.5) < 0.08;
+      const here = bandPower(freqs, psd, this.freqHz, 0.1);
+      const there = bandPower(freqs, psd, target, 0.1);
+      if (isOctave && there < 3 * here) {
+        target = this.freqHz;   // not decisively better: keep continuity
+      }
+    }
+
+    // The slew limit keys off the lock state, not off raw confidence. Keying it
+    // off confidence created a feedback loop: a dip let the rate jump, the jump
+    // cost SNR, the lost SNR deepened the dip.
+    const maxStep = this.state === 'locked' ? this.opt.slewLockedHz : this.opt.slewSearchHz;
+    return this.freqHz + clamp(target - this.freqHz, -maxStep, maxStep);
+  }
+
+  /** Schmitt-triggered lock state with a dwell time on the way out. */
+  _updateLock(t) {
+    const { lockEnter, lockExit, lockDwellSec } = this.opt;
+    if (this.state === 'locked') {
+      if (this.confidence < lockExit) {
+        if (this._belowSince == null) this._belowSince = t;
+        if (t - this._belowSince >= lockDwellSec) {
+          this.state = 'searching';
+          this._belowSince = null;
+        }
+      } else {
+        this._belowSince = null;
+      }
+    } else if (this.confidence >= lockEnter) {
+      this.state = 'locked';
+      this._belowSince = null;
+    } else {
+      this.state = 'searching';
+    }
   }
 
   /** Most recent `n` filtered samples, oldest first. */
@@ -373,6 +493,11 @@ export class RppgPipeline {
         roiFill: round(this.quality.roiFill ?? 0, 3),
         motion: round(this.quality.motion ?? 0, 4),
         clipping: round(this.quality.clipping ?? 0, 3),
+        // True while a large artefact is still inside the analysis window. The
+        // heart rate is held rather than re-estimated for as long as this is
+        // set, so a consumer knows the reading is stale rather than wrong.
+        contaminated: this.elapsed < this.artefactUntil,
+        artefacts: this.artefacts,
       },
       method: this.opt.method,
       fs: this.opt.fs,

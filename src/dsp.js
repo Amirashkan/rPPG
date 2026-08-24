@@ -146,12 +146,15 @@ export function bandPeak(freqs, psd, loHz, hiHz, { harmonicHalfWidth = 0.15 } = 
   const df = freqs[1] - freqs[0];
   const freq = freqs[best] + delta * df;
 
-  // SNR: power near the fundamental and its first harmonic vs. the rest of the band.
+  // SNR: power near the fundamental and its first harmonic vs. everything else
+  // in the same band. Signal and noise must be measured over the *same* range -
+  // extending the noise range past the band-pass cutoff counts attenuated bins
+  // as noise and reports an SNR several dB better than the signal really is.
   let sig = 0;
   let noise = 0;
   for (let k = 0; k < psd.length; k++) {
     const f = freqs[k];
-    if (f < loHz || f > hiHz * 2 + harmonicHalfWidth) continue;
+    if (f < loHz || f > hiHz) continue;
     const nearF0 = Math.abs(f - freq) <= harmonicHalfWidth;
     const nearH1 = Math.abs(f - 2 * freq) <= harmonicHalfWidth;
     if (nearF0 || nearH1) sig += psd[k];
@@ -159,10 +162,38 @@ export function bandPeak(freqs, psd, loHz, hiHz, { harmonicHalfWidth = 0.15 } = 
   }
   const snrDb = 10 * Math.log10((sig + 1e-30) / (noise + 1e-30));
 
-  let bandPower = 0;
-  for (let k = 0; k < psd.length; k++) if (freqs[k] >= loHz && freqs[k] <= hiHz) bandPower += psd[k];
+  let total = 0;
+  for (let k = 0; k < psd.length; k++) if (freqs[k] >= loHz && freqs[k] <= hiHz) total += psd[k];
 
-  return { freq, power: psd[best], snrDb, bandPower };
+  return { freq, power: psd[best], snrDb, bandPower: total };
+}
+
+/**
+ * The tallest local maximum within `halfWidth` Hz of `centre`, or null if the
+ * spectrum has no peak there. Distinguishing a real peak from mere energy is
+ * what makes a sub-harmonic test safe: broadband noise carries power at f/2,
+ * but it does not put a peak there.
+ */
+export function localPeakNear(freqs, psd, centre, halfWidth) {
+  let best = -1;
+  let bestP = -Infinity;
+  for (let k = 1; k < psd.length - 1; k++) {
+    if (Math.abs(freqs[k] - centre) > halfWidth) continue;
+    if (psd[k] >= psd[k - 1] && psd[k] >= psd[k + 1] && psd[k] > bestP) {
+      bestP = psd[k];
+      best = k;
+    }
+  }
+  return best < 0 ? null : { index: best, freq: freqs[best], power: bestP };
+}
+
+/** Total power within `halfWidth` Hz of `centre`. */
+export function bandPower(freqs, psd, centre, halfWidth) {
+  let sum = 0;
+  for (let k = 0; k < psd.length; k++) {
+    if (Math.abs(freqs[k] - centre) <= halfWidth) sum += psd[k];
+  }
+  return sum;
 }
 
 // --------------------------------------------------------------- filters ---

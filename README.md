@@ -35,7 +35,9 @@ camera frames
 ```
 
 The heart rate comes from the Welch spectrum over a 10 s window with sub-bin
-interpolation. The cardiac **phase** comes from quadrature demodulation at the
+interpolation, with an octave guard so a strong second harmonic cannot double
+the reported rate, and artefact rejection that holds the last good rate while a
+large excursion is still inside the analysis window. The cardiac **phase** comes from quadrature demodulation at the
 tracked rate — a continuous 0..2π angle that keeps advancing smoothly even when
 an individual beat detection is missed. That phase is what makes a good external
 animation possible.
@@ -131,8 +133,12 @@ all, and that the relay's hand-rolled WebSocket framing round-trips.
   rates that fold straight into the pulse band.
 - Sit still. `quality.motion` above ~0.02 will show in the confidence.
 - Keep the ROI on your forehead. Drag it to move, drag the corner to resize.
-- Watch `roiFill`: below ~30% the skin mask is not finding your face, so uncheck
-  the mask or move the box.
+- Watch `roiFill`: below ~35% the skin mask is not finding skin, so move the box.
+  The mask gates on hue *and* on brightness relative to the ROI median, so hair,
+  eyebrows, glasses frames and lens glints are excluded — which is why a box
+  that overlaps them reports a low percentage even though it looks full of face.
+- **Forehead only.** A box that catches eyebrows, glasses or the eyes will pick
+  up blinks and frame glints, and those are far larger than a heartbeat.
 
 ## Limits
 

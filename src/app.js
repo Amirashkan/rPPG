@@ -201,9 +201,33 @@ function drawOverlay() {
   const fill = latest?.quality.roiFill ?? 0;
   ctx.fillStyle = 'rgba(11,15,23,.7)';
   ctx.fillRect(x, y - 20, 104, 18);
-  ctx.fillStyle = '#e6edf7';
+  ctx.fillStyle = fill < 0.35 ? '#f0537d' : '#e6edf7';
   ctx.font = '11px ui-monospace, monospace';
   ctx.fillText(`skin ${(fill * 100).toFixed(0)}%`, x + 6, y - 7);
+
+  // Say what is wrong, rather than leaving a low confidence unexplained.
+  const warn = roiWarning();
+  if (warn) {
+    ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+    const tw = ctx.measureText(warn).width + 16;
+    const bx = Math.max(4, Math.min(stage.width - tw - 4, x + w / 2 - tw / 2));
+    const by = Math.min(stage.height - 26, y + h + 8);
+    ctx.fillStyle = 'rgba(240,83,125,.9)';
+    ctx.fillRect(bx, by, tw, 20);
+    ctx.fillStyle = '#2a0512';
+    ctx.fillText(warn, bx + 8, by + 14);
+  }
+}
+
+/** The most useful single thing to tell the user about signal quality. */
+function roiWarning() {
+  if (!latest) return null;
+  const q = latest.quality;
+  if (q.contaminated) return 'movement detected — hold still';
+  if (q.roiFill < 0.35) return 'ROI is mostly not skin — move it onto bare forehead';
+  if (q.clipping > 0.05) return 'overexposed — reduce light or move away from the window';
+  if (q.motion > 0.03) return 'too much motion';
+  return null;
 }
 
 function updateReadout() {
